@@ -945,6 +945,8 @@ function extractAllMissingFiles(logContent, alreadyFetched) {
         /! I can't find file `([^']+)'/g,
         /LaTeX Warning:.*File `([^']+)' not found/g,
         /Package .* Error:.*`([^']+)' not found/g,
+        /! Font [^=]+=\[([^\]]+\.(?:otf|ttf))\]/gi,
+        /kpathsea: Running mktextfm ([a-z0-9-]+)/gi,
         /! Font [^=]+=([a-z0-9-]+) at .* not loadable: Metric \(TFM\) file/g,
         /!pdfTeX error:.*\(file ([a-z0-9-]+)\): Font .* not found/g,
         /! Font ([a-z0-9-]+) at [0-9]+ not found/g,
@@ -977,7 +979,8 @@ function getFontPackage(fontName) {
     if (!fontName) return null;
 
     // Strip font extension if present
-    const baseName = fontName.replace(/\.(pfb|tfm)$/i, '');
+    const baseName = (fontName.split(/[\\/]/).pop() || fontName).replace(/\.(pfb|tfm)$/i, '');
+    if (/^fa5(?:free|brands)/i.test(baseName)) return 'fontawesome5';
 
     // Dynamic lookup: check font file index first (covers ALL fonts in bundles)
     if (fontFileToBundle) {
@@ -992,13 +995,16 @@ function getFontPackage(fontName) {
 
     // Fallback: Latin Modern patterns for CTAN fetch (when not in local bundles)
     if (/^(rm|cs|ec|ts|qx|t5|l7x)-?lm/.test(baseName)) return 'lm';
+    if (/^phv[a-z0-9-]*$/i.test(baseName)) return 'helvetic';
     if (/^lm[a-z]{1,4}\d+$/.test(baseName)) return 'lm';
 
     return null;
 }
 
 function getPackageFromFile(filename) {
-    const fontPkg = getFontPackage(filename);
+    const baseName = filename.split(/[\\/]/).pop() || filename;
+    if (/^FontAwesome5(?:Free|Brands)-/i.test(baseName)) return 'fontawesome5';
+    const fontPkg = getFontPackage(baseName);
     if (fontPkg) return fontPkg;
 
     // Strip extension - the file-to-package index handles the mapping
@@ -1313,6 +1319,7 @@ async function handleCompile(request) {
     const fetchedPackages = new Set();
     // Use global cache for Range-fetched files (persists across compiles)
     let lastExitCode = -1;
+    let lastCompileOutput = '';
     let Module = null;
     let FS = null;
 
@@ -1449,6 +1456,7 @@ async function handleCompile(request) {
                 }
             }
 
+            lastCompileOutput = [result.stdout, result.stderr].filter(Boolean).join('\n');
             lastExitCode = result.exit_code;
 
             if (result.exit_code === 0) {
@@ -1723,7 +1731,9 @@ async function handleCompile(request) {
                             // or if it maps to a bundle via packageMap
                             let bundleName = bundleRegistry?.has(pkgName) ? pkgName : packageMap?.[pkgName];
 
-                            if (bundleName && !bundleDataMap.has(bundleName)) {
+                            if (/\.(otf|ttf)$/i.test(missingFile) || /^fa5(?:free|brands)/i.test(missingFile)) {
+                                ctanToFetch.push({ missingFile, pkgName });
+                            } else if (bundleName && !bundleDataMap.has(bundleName)) {
                                 bundlesToFetch.push({ missingFile, pkgName, bundleName });
                             } else if (!bundleName) {
                                 ctanToFetch.push({ missingFile, pkgName });
@@ -1917,6 +1927,12 @@ async function handleCompile(request) {
     // we try to restore a post-compilation snapshot. Fast recompiles come from format
     // caching (.fmt files with pre-compiled preambles) instead.
 
+    let failureLog = '';
+    if (!compileSuccess && FS) {
+        try { failureLog = FS.readFile('/document.log', { encoding: 'utf8' }); } catch (e) {}
+        failureLog = [failureLog, lastCompileOutput].filter(Boolean).join('\n');
+    }
+
     // Help GC by clearing references we no longer need
     // The Module/FS will be recreated on next compile anyway
     Module = null;
@@ -1940,6 +1956,8 @@ async function handleCompile(request) {
             pdfDataIsShared: true,
             syncTexData,
             exitCode: lastExitCode,
+            error: compileSuccess ? undefined : `TeX exited with code ${lastExitCode}`,
+            log: failureLog,
             auxFilesToCache: auxFiles,
             stats
         });
@@ -1953,6 +1971,8 @@ async function handleCompile(request) {
             pdfDataIsShared: false,
             syncTexData,
             exitCode: lastExitCode,
+            error: compileSuccess ? undefined : `TeX exited with code ${lastExitCode}`,
+            log: failureLog,
             auxFilesToCache: auxFiles,
             stats
         }, pdfData ? [pdfData.buffer] : []);

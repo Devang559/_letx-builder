@@ -1,4 +1,4 @@
-import Editor, { type OnMount } from "@monaco-editor/react";
+import { type OnMount } from "@monaco-editor/react";
 import {
   type ChangeEvent,
   type PointerEvent as ReactPointerEvent,
@@ -9,60 +9,45 @@ import {
 } from "react";
 import { usePDFSlick } from "@pdfslick/react";
 import type { SiglumCompiler } from "@siglum/engine";
-import { DEFAULT_TEMPLATE } from "./template";
-
-const STORAGE_KEY = "resume-editor:source";
-const SIGLUM_BASE = "https://cdn.siglum.org/tl2025";
-const ctanProxyUrl = import.meta.env.VITE_SIGLUM_CTAN_PROXY_URL?.trim();
+import { AppHeader } from "../features/resume-editor/components/AppHeader";
+import { EditorPane } from "../features/resume-editor/components/EditorPane";
+import { HistoryScreen } from "../features/resume-editor/components/HistoryScreen";
+import {
+  COMPILE_HISTORY_KEY,
+  CTAN_PROXY_URL,
+  DOCUMENT_NAME_KEY,
+  SIGLUM_BASE,
+  STORAGE_KEY,
+} from "../features/resume-editor/config";
+import { DEFAULT_TEMPLATE } from "../features/resume-editor/template";
+import type {
+  CompileFailure,
+  CompileHistoryEntry,
+  SavedPosition,
+} from "../features/resume-editor/types";
+import {
+  downloadBlob,
+  normalizeDocumentName,
+  parseCompileHistory,
+  parseCompileFailure,
+} from "../features/resume-editor/utils";
+import { Icon } from "../components/Icon";
 
 type EditorInstance = Parameters<OnMount>[0];
-type CompileFailure = {
-  message: string;
-  firstFatal: string;
-  lastLines: string[];
-};
-type SavedPosition = { page: number; offset: number };
-
-function parseCompileFailure(log: string, message: string): CompileFailure {
-  const lines = log.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const fatal = lines.find((line) => /^!\s/.test(line)) ?? message;
-  return {
-    message,
-    firstFatal: fatal,
-    lastLines: lines.slice(-5),
-  };
-}
-
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function Icon({
-  children,
-  className,
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <span className={`icon ${className ?? ""}`} aria-hidden="true">
-      {children}
-    </span>
-  );
-}
 
 export default function App() {
   const [source, setSource] = useState(
     () => localStorage.getItem(STORAGE_KEY) ?? DEFAULT_TEMPLATE,
   );
+  const [documentName, setDocumentName] = useState(() =>
+    normalizeDocumentName(localStorage.getItem(DOCUMENT_NAME_KEY) ?? "resume"),
+  );
   const [isCompiling, setIsCompiling] = useState(false);
+  const [isLightMode, setIsLightMode] = useState(() => {
+    const savedTheme = localStorage.getItem("theme-mode");
+    if (savedTheme) return savedTheme === "light";
+    return window.matchMedia("(prefers-color-scheme: light)").matches;
+  });
   const [compileError, setCompileError] = useState<CompileFailure | null>(null);
   const [errorCount, setErrorCount] = useState(0);
   const [isErrorOpen, setIsErrorOpen] = useState(true);
@@ -74,6 +59,15 @@ export default function App() {
   const [isDraggingSplit, setIsDraggingSplit] = useState(false);
   const [editorReady, setEditorReady] = useState(false);
   const [viewerReady, setViewerReady] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [historyState, setHistoryState] = useState(() => {
+    try {
+      return { entries: parseCompileHistory(localStorage.getItem(COMPILE_HISTORY_KEY)), error: "" };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { entries: [] as CompileHistoryEntry[], error: `Could not read saved history: ${message}` };
+    }
+  });
   const editorRef = useRef<EditorInstance | null>(null);
   const compilerRef = useRef<SiglumCompiler | null>(null);
   const pdfBlobRef = useRef<Blob | null>(null);
@@ -107,6 +101,14 @@ export default function App() {
     }, 500);
     return () => window.clearTimeout(timer);
   }, [source]);
+
+  useEffect(() => {
+    localStorage.setItem(DOCUMENT_NAME_KEY, documentName);
+  }, [documentName]);
+
+  useEffect(() => {
+    localStorage.setItem("theme-mode", isLightMode ? "light" : "dark");
+  }, [isLightMode]);
 
   useEffect(() => {
     currentPdfUrlRef.current = pdfUrl;
@@ -184,19 +186,75 @@ export default function App() {
   const handleEditorMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
     setEditorReady(true);
+
+    monaco.editor.defineTheme("latex-light", {
+      base: "vs",
+      inherit: true,
+      rules: [
+        { token: "comment", foreground: "6b7280", fontStyle: "italic" },
+        { token: "keyword", foreground: "1d4ed8", fontStyle: "bold" },
+        { token: "string", foreground: "0f766e" },
+        { token: "number", foreground: "b45309" },
+        { token: "delimiter", foreground: "475569" },
+        { token: "math", foreground: "7c3aed" },
+        { token: "identifier", foreground: "1f2937" },
+      ],
+      colors: {
+        "editor.background": "#f8fafc",
+        "editorLineNumber.foreground": "#94a3b8",
+        "editorCursor.foreground": "#0f172a",
+        "editor.selectionBackground": "#bfdbfe",
+        "editor.lineHighlightBackground": "#f1f5f9",
+      },
+    });
+
+    monaco.editor.defineTheme("latex-dark", {
+      base: "vs-dark",
+      inherit: true,
+      rules: [
+        { token: "comment", foreground: "8b949e", fontStyle: "italic" },
+        { token: "keyword", foreground: "7dd3fc", fontStyle: "bold" },
+        { token: "string", foreground: "5eead4" },
+        { token: "number", foreground: "fbbf24" },
+        { token: "delimiter", foreground: "cbd5e1" },
+        { token: "math", foreground: "c4b5fd" },
+        { token: "identifier", foreground: "e2e8f0" },
+      ],
+      colors: {
+        "editor.background": "#0f172a",
+        "editorLineNumber.foreground": "#64748b",
+        "editorCursor.foreground": "#f8fafc",
+        "editor.selectionBackground": "#334155",
+        "editor.lineHighlightBackground": "#111827",
+      },
+    });
+
     monaco.languages.register({ id: "latex" });
     monaco.languages.setMonarchTokensProvider("latex", {
+      defaultToken: "text",
       tokenizer: {
         root: [
           [/%.*/, "comment"],
-          [/\\[a-zA-Z@]+/, "keyword"],
+          [/\\[A-Za-z@]+\*?/, "keyword"],
           [/\\./, "keyword"],
-          [/[{}[\]]/, "delimiter"],
-          [/\d+/, "number"],
-          [/[a-zA-Z]+/, "identifier"],
+          [/\^|_/, "math"],
+          [/[{}\[\]()]/, "delimiter"],
+          [/[+-]?\d+(?:\.\d+)?/, "number"],
+          [/"(?:[^"]|\\")*"/, "string"],
+          [/'(?:[^']|\\')*'/, "string"],
+          [/[A-Za-z]+/, "identifier"],
+          [/\s+/, "white"],
         ],
       },
     });
+  };
+
+  const navigateToLine = (line: number) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.revealLineInCenter(line);
+    editor.setPosition({ lineNumber: line, column: 1 });
+    editor.focus();
   };
 
   const capturePdfPosition = useCallback(() => {
@@ -228,9 +286,10 @@ export default function App() {
 
   const compile = async () => {
     if (isCompiling) return;
+    const sourceToCompile = source;
     setIsCompiling(true);
     setCompileError(null);
-    setEngineProgress("Starting XeLaTeX…");
+    setEngineProgress("Starting pdfLaTeX…");
     compilerLogRef.current = [];
     capturePdfPosition();
     pendingRestoreRef.current = Boolean(pdfUrl);
@@ -243,14 +302,25 @@ export default function App() {
       }
 
       if (!compilerRef.current) {
-        const { SiglumCompiler: Compiler } = await import("@siglum/engine");
+        const { SiglumCompiler: Compiler, forceRefreshPackage } = await import("@siglum/engine");
+        const cacheMigrationKey = "resume-editor:siglum-package-cache:tl2025-api-v4";
+        if (CTAN_PROXY_URL && localStorage.getItem(cacheMigrationKey) !== "done") {
+          const refreshed = await Promise.all(
+            ["helvetic", "phvr7t", "psnfss", "fontawesome5"].map(forceRefreshPackage),
+          );
+          if (refreshed.some((success) => !success)) {
+            throw new Error("Could not refresh the cached TeX package results. Clear this site's storage and retry.");
+          }
+          localStorage.setItem(cacheMigrationKey, "done");
+        }
         compilerRef.current = new Compiler({
           bundlesUrl: `${SIGLUM_BASE}/bundles`,
           wasmUrl: `${SIGLUM_BASE}/busytex.wasm`,
           jsUrl: `${SIGLUM_BASE}/busytex.js`,
+          xzwasmUrl: `${import.meta.env.BASE_URL}xzwasm.min.js`,
           workerUrl: `${import.meta.env.BASE_URL}worker.js`,
-          ctanProxyUrl: ctanProxyUrl || undefined,
-          enableCtan: Boolean(ctanProxyUrl),
+          ctanProxyUrl: CTAN_PROXY_URL || undefined,
+          enableCtan: Boolean(CTAN_PROXY_URL),
           enableLazyFS: true,
           enableDocCache: true,
           onProgress: (stage, detail) => setEngineProgress(`${stage}: ${detail}`),
@@ -262,14 +332,32 @@ export default function App() {
       }
 
       await compilerRef.current.init();
-      const result = await compilerRef.current.compile(source, {
-        engine: "xelatex",
+      const result = await compilerRef.current.compile(sourceToCompile, {
+        engine: 'pdflatex',
         useCache: true,
       });
       if (!result.success || !result.pdf) {
-        throw Object.assign(new Error(result.error || "XeLaTeX compilation failed."), {
-          texLog: [result.log, ...compilerLogRef.current].filter(Boolean).join("\n"),
+        throw Object.assign(new Error(result.error || "pdfLaTeX compilation failed."), {
+          texLog: [...compilerLogRef.current, result.log].filter(Boolean).join("\n"),
         });
+      }
+
+      const historyEntry: CompileHistoryEntry = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        documentName,
+        source: sourceToCompile,
+        compiledAt: new Date().toISOString(),
+      };
+      const nextHistory = [...historyState.entries, historyEntry];
+      try {
+        localStorage.setItem(COMPILE_HISTORY_KEY, JSON.stringify(nextHistory));
+        setHistoryState({ entries: nextHistory, error: "" });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setHistoryState((current) => ({
+          ...current,
+          error: `The PDF compiled, but its history could not be saved in this browser: ${message}`,
+        }));
       }
 
       const pdfArrayBuffer = new ArrayBuffer(result.pdf.byteLength);
@@ -301,12 +389,15 @@ export default function App() {
   };
 
   const downloadTex = () => {
-    downloadBlob(new Blob([source], { type: "text/plain;charset=utf-8" }), "resume.tex");
+    downloadBlob(
+      new Blob([source], { type: "text/plain;charset=utf-8" }),
+      `${documentName}.tex`,
+    );
   };
 
   const downloadPdf = async () => {
     if (!pdfBlobRef.current) return;
-    downloadBlob(pdfBlobRef.current, "resume.pdf");
+    downloadBlob(pdfBlobRef.current, `${documentName}.pdf`);
   };
 
   const changeScale = (direction: -1 | 1) => {
@@ -358,145 +449,47 @@ export default function App() {
   const zoomLabel = `${Math.round((scale || 1) * 100)}%`;
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="#" aria-label="Resume Studio home">
-          <span className="brand-mark">R</span>
-          <span>resume<span className="brand-light">studio</span></span>
-        </a>
-        <div className="toolbar-actions">
-          <button
-            className={`button button-primary ${isCompiling ? "is-busy" : ""}`}
-            type="button"
-            onClick={compile}
-            disabled={isCompiling}
-            title="Compile with XeLaTeX"
-          >
-            {isCompiling ? <span className="spinner" /> : <Icon>▶</Icon>}
-            {isCompiling ? "Compiling" : "Compile"}
-            {errorCount > 0 && <span className="error-badge">{errorCount}</span>}
-          </button>
-          <span className="toolbar-separator" />
-          <button
-            className="button button-quiet"
-            type="button"
-            aria-label="Undo"
-            title="Undo"
-            disabled={!editorReady}
-            onClick={() => editorRef.current?.trigger("toolbar", "undo", null)}
-          >
-            <Icon>↶</Icon><span className="button-label">Undo</span>
-          </button>
-          <button
-            className="button button-quiet"
-            type="button"
-            aria-label="Redo"
-            title="Redo"
-            disabled={!editorReady}
-            onClick={() => editorRef.current?.trigger("toolbar", "redo", null)}
-          >
-            <Icon>↷</Icon><span className="button-label">Redo</span>
-          </button>
-          <span className="toolbar-separator" />
-          <button
-            className="button button-quiet"
-            type="button"
-            aria-label="Download .tex source"
-            title="Download .tex source"
-            onClick={downloadTex}
-          >
-            <Icon>↓</Icon><span className="button-label">.tex</span>
-          </button>
-          <button
-            className="button button-quiet"
-            type="button"
-            onClick={() => void downloadPdf()}
-            disabled={!pdfUrl}
-          >
-            <Icon>⇩</Icon><span className="button-label">PDF</span>
-          </button>
-        </div>
-        <div className="topbar-status">
-          <span className="status-dot" />
-          <span>Saved locally</span>
-        </div>
-      </header>
+    <main className={`app-shell ${isLightMode ? "theme-light" : ""}`}>
+      <AppHeader
+        isCompiling={isCompiling}
+        errorCount={errorCount}
+        editorReady={editorReady}
+        hasPdf={Boolean(pdfUrl)}
+        isLightMode={isLightMode}
+        onOpenHistory={() => setIsHistoryOpen(true)}
+        onCompile={compile}
+        onToggleTheme={() => setIsLightMode((current) => !current)}
+        onUndo={() => editorRef.current?.trigger("toolbar", "undo", null)}
+        onRedo={() => editorRef.current?.trigger("toolbar", "redo", null)}
+        onDownloadTex={downloadTex}
+        onDownloadPdf={() => void downloadPdf()}
+      />
+      {isHistoryOpen && (
+        <HistoryScreen
+          entries={historyState.entries}
+          error={historyState.error}
+          onClose={() => setIsHistoryOpen(false)}
+        />
+      )}
 
       <section
         className={`workbench ${isDraggingSplit ? "is-resizing" : ""}`}
         ref={splitRef}
         style={{ "--split": `${splitPercent}%` } as React.CSSProperties}
       >
-        <section className="editor-pane" aria-label="LaTeX source editor">
-          <div className="pane-heading">
-            <div className="pane-title">
-              <Icon className="file-icon">▤</Icon>
-              <span>resume.tex</span>
-              <span className="file-type">LaTeX</span>
-            </div>
-            <span className="pane-meta">XeLaTeX</span>
-          </div>
-          <div className="editor-container">
-            <Editor
-              height="100%"
-              language="latex"
-              theme="vs-dark"
-              value={source}
-              onChange={(value) => setSource(value ?? "")}
-              onMount={handleEditorMount}
-              options={{
-                automaticLayout: true,
-                fontFamily: "'Cascadia Code', 'SFMono-Regular', Consolas, monospace",
-                fontSize: 14,
-                lineHeight: 22,
-                minimap: { enabled: false },
-                lineNumbers: "on",
-                roundedSelection: false,
-                scrollBeyondLastLine: false,
-                wordWrap: "on",
-                bracketPairColorization: { enabled: true },
-                matchBrackets: "always",
-                autoIndent: "full",
-                tabSize: 4,
-                padding: { top: 16, bottom: 24 },
-                renderLineHighlight: "line",
-                guides: { indentation: true },
-                suggest: { showWords: false },
-              }}
-            />
-          </div>
-          <div className="editor-footer">
-            <span><span className="footer-dot" /> LaTeX</span>
-            <span>UTF-8&nbsp;&nbsp; · &nbsp;&nbsp;{source.split("\n").length} lines</span>
-          </div>
-          {compileError && (
-            <section className="error-panel" aria-live="polite">
-              <button
-                className="error-panel-heading"
-                type="button"
-                onClick={() => setIsErrorOpen((open) => !open)}
-                aria-expanded={isErrorOpen}
-              >
-                <span><span className="error-symbol">!</span> Compilation failed</span>
-                <span className="error-chevron">{isErrorOpen ? "⌄" : "›"}</span>
-              </button>
-              {isErrorOpen && (
-                <div className="error-content">
-                  <p className="fatal-line">{compileError.firstFatal}</p>
-                  <pre>{compileError.lastLines.join("\n") || compileError.message}</pre>
-                  {!ctanProxyUrl && (
-                    <p className="proxy-hint">
-                      Package fetching is disabled because no CTAN proxy is configured.
-                      If the log reports a missing .sty or .cls package, run Siglum&apos;s
-                      proxy and set VITE_SIGLUM_CTAN_PROXY_URL (for example,
-                      http://localhost:8081) to its CORS-enabled URL, then restart Vite.
-                    </p>
-                  )}
-                </div>
-              )}
-            </section>
-          )}
-        </section>
+        <EditorPane
+          source={source}
+          documentName={documentName}
+          compileError={compileError}
+          isErrorOpen={isErrorOpen}
+          ctanProxyUrl={CTAN_PROXY_URL}
+          isLightMode={isLightMode}
+          onSourceChange={setSource}
+          onDocumentNameChange={(name) => setDocumentName(normalizeDocumentName(name))}
+          onEditorMount={handleEditorMount}
+          onNavigateToLine={navigateToLine}
+          onToggleError={() => setIsErrorOpen((open) => !open)}
+        />
 
         <button
           className="split-divider"
@@ -523,6 +516,8 @@ export default function App() {
               >‹</button>
               <label className="page-control">
                 <input
+                  id="current-page"
+                  name="currentPage"
                   aria-label="Current page"
                   value={pageNumber || 0}
                   onChange={changePage}
@@ -618,7 +613,7 @@ export default function App() {
             {pdfUrl && !viewerReady && <span className="sr-only">Preparing PDF viewer</span>}
           </div>
           <div className="preview-footer">
-            <span>{pdfUrl ? "resume.pdf" : "No compiled PDF yet"}</span>
+            <span>{pdfUrl ? `${documentName}.pdf` : "No compiled PDF yet"}</span>
             <span>{pdfUrl ? `${pageCount} ${pageCount === 1 ? "page" : "pages"}` : "PDF preview"}</span>
           </div>
         </section>
